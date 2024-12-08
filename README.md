@@ -73,3 +73,12 @@ docker-compose up --build
 - `python-df.dockerfile`: Python 컨테이너 설정 파일입니다.
 - `index_performance_test.py`: 성능 테스트를 위한 Python 스크립트입니다.
 - `requirements.txt`: Python 종속성 패키지 목록입니다.
+
+## 테스트 결과 요약
+
+- 인덱싱은 예상처럼 동작하지 않음
+- 파티션을 통한 최적화는 유효했음
+
+## TODO
+
+- 인덱싱이 예상처럼 동작하지 않은 이유 분석 필요
