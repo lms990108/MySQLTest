@@ -41,12 +41,9 @@ def create_table(cursor):
     """)
 
 def insert_batch(start, end):
-    
     try:
         cnx = mysql.connector.connect(**DB_CONFIG)
         cursor = cnx.cursor()
-        
-        # 데이터베이스 선택
         cursor.execute("USE IndexTestComparison;")
 
         batch_size = 1000
@@ -104,20 +101,80 @@ def measure_query_performance(cursor, query):
     elapsed_time = time.time() - start_time
     return len(rows), elapsed_time
 
+def explain_query(cursor, query):
+    print(f"\n[EXPLAIN] {query}")
+    cursor.execute(f"EXPLAIN {query}")
+    for row in cursor.fetchall():
+        print(row)
+
 def run_test_scenario(cursor, description, create_index_queries, test_queries):
     print(f"==== {description} ====")
+    
+    # 인덱스 생성
     for query in create_index_queries:
         try:
             cursor.execute(query)
-        except mysql.connector.Error:
-            pass  # 이미 존재하는 인덱스 무시
+        except mysql.connector.Error as err:
+            print(f"인덱스 생성 중 오류 발생: {err}")
+    
+    # 커밋하여 인덱스 생성 완료 보장
+    cursor._connection.commit()
 
+    # 쿼리 실행
     results = []
     for test_query in test_queries:
-        rows, elapsed_time = measure_query_performance(cursor, test_query)
-        print(f"쿼리: {test_query}\n결과 수: {rows}, 실행 시간: {elapsed_time:.2f}초")
-        results.append((test_query, rows, elapsed_time))
+        try:
+            # 실행 계획 출력
+            explain_query(cursor, test_query)
+
+            # 쿼리 실행 및 성능 측정
+            rows, elapsed_time = measure_query_performance(cursor, test_query)
+            print(f"쿼리: {test_query}\n결과 수: {rows}, 실행 시간: {elapsed_time:.2f}초")
+            results.append((test_query, rows, elapsed_time))
+        except mysql.connector.Error as err:
+            print(f"쿼리 실행 중 오류 발생: {err}")
     return results
+
+def create_partitioned_table(cursor):
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS products_partitioned (
+        id INT AUTO_INCREMENT,
+        name VARCHAR(255),
+        category VARCHAR(100),
+        price DECIMAL(10, 2),
+        stock INT,
+        description TEXT,
+        PRIMARY KEY (id, category)
+    ) PARTITION BY LIST COLUMNS(category) (
+        PARTITION p_electronics VALUES IN ('Electronics'),
+        PARTITION p_clothing VALUES IN ('Clothing'),
+        PARTITION p_books VALUES IN ('Books'),
+        PARTITION p_home VALUES IN ('Home'),
+        PARTITION p_toys VALUES IN ('Toys')
+    );
+    """)
+
+def populate_partitioned_table(cursor):
+    cursor.execute("""
+    INSERT INTO products_partitioned (id, name, category, price, stock, description)
+    SELECT id, name, category, price, stock, description FROM products;
+    """)
+
+def run_partition_test(cursor):
+    print("==== Partitioning Test ====")
+    partition_queries = [
+        "SELECT SQL_NO_CACHE * FROM products_partitioned WHERE category = 'Electronics';",
+        "SELECT SQL_NO_CACHE * FROM products_partitioned WHERE category = 'Electronics' AND stock > 50;",
+        "SELECT SQL_NO_CACHE * FROM products_partitioned WHERE price > 50 AND stock < 500;",
+    ]
+    return run_test_scenario(cursor, "Partitioning", [], partition_queries)
+
+def run_materialized_view_test(cursor):
+    print("==== Materialized View Test ====")
+    materialized_view_queries = [
+        "SELECT SQL_NO_CACHE * FROM materialized_products WHERE category = 'Electronics';",
+    ]
+    return run_test_scenario(cursor, "Materialized View", [], materialized_view_queries)
 
 def main():
     cnx = connect_with_retries(DB_CONFIG)
@@ -126,31 +183,47 @@ def main():
     create_table(cursor)
 
     print("데이터를 병렬로 삽입 중입니다...")
-    insert_sample_data_parallel(total_records=5000000, num_threads=10)
+    insert_sample_data_parallel(total_records=1000000, num_threads=10)
 
-    test_queries = [
+    # Partitioning 테스트 준비
+    create_partitioned_table(cursor)
+    populate_partitioned_table(cursor)
+
+    # Partitioning 테스트 실행
+    run_partition_test(cursor)
+
+    # 최악의 인덱싱 테스트 실행
+    worst_indexes = [
+        "CREATE INDEX idx_description ON products (description(255));",  # 키 길이 지정
+        "CREATE INDEX idx_name_stock ON products (name, stock);",
+    ]
+    worst_index_test_queries = [
+        "SELECT SQL_NO_CACHE * FROM products FORCE INDEX (idx_description) WHERE category = 'Electronics';",
+        "SELECT SQL_NO_CACHE * FROM products FORCE INDEX (idx_name_stock) WHERE category = 'Electronics' AND stock > 50;",
+        "SELECT SQL_NO_CACHE * FROM products FORCE INDEX (idx_name_stock) WHERE price > 50 AND stock < 500;",
+    ]
+    run_test_scenario(cursor, "최악의 인덱싱", worst_indexes, worst_index_test_queries)
+
+    # 최선의 인덱싱 테스트 실행
+    best_indexes = [
+        "CREATE INDEX idx_category ON products (category);",
+        "CREATE INDEX idx_category_stock ON products (category, stock);",
+        "CREATE INDEX idx_price_stock ON products (price, stock);",
+    ]
+    best_index_test_queries = [
+        "SELECT SQL_NO_CACHE * FROM products FORCE INDEX (idx_category) WHERE category = 'Electronics';",
+        "SELECT SQL_NO_CACHE * FROM products FORCE INDEX (idx_category_stock) WHERE category = 'Electronics' AND stock > 50;",
+        "SELECT SQL_NO_CACHE * FROM products FORCE INDEX (idx_price_stock) WHERE price > 50 AND stock < 500;",
+    ]
+    run_test_scenario(cursor, "최선의 인덱싱", best_indexes, best_index_test_queries)
+
+    # 인덱싱 없는 경우 테스트 실행
+    no_index_test_queries = [
         "SELECT SQL_NO_CACHE * FROM products WHERE category = 'Electronics';",
         "SELECT SQL_NO_CACHE * FROM products WHERE category = 'Electronics' AND stock > 50;",
         "SELECT SQL_NO_CACHE * FROM products WHERE price > 50 AND stock < 500;",
     ]
-
-    # 1. 인덱싱 없는 경우
-    run_test_scenario(cursor, "인덱싱 없는 경우", [], test_queries)
-
-    # 2. 최악의 인덱싱
-    worst_indexes = [
-        "CREATE INDEX idx_name ON products (name);",
-        "CREATE INDEX idx_price_stock ON products (price, stock);",
-    ]
-    run_test_scenario(cursor, "최악의 인덱싱", worst_indexes, test_queries)
-
-    # 3. 최선의 인덱싱
-    best_indexes = [
-        "CREATE INDEX idx_category ON products (category);",
-        "CREATE INDEX idx_category_stock ON products (category, stock);",
-        "CREATE INDEX idx_price_stock ON products (stock, price);",
-    ]
-    run_test_scenario(cursor, "최선의 인덱싱", best_indexes, test_queries)
+    run_test_scenario(cursor, "인덱싱 없는 경우", [], no_index_test_queries)
 
     cursor.close()
     cnx.close()
