@@ -15,7 +15,7 @@
 #### Git Clone
 
 ```bash
-git clone <repository_url>
+git clone https://github.com/lms990108/MySQLTest
 cd MYSQL_PRACTICE
 ```
 
